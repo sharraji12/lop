@@ -556,4 +556,349 @@ async function recheckSolutions() {
 
     if (!apiKey) {
         alert('Please enter API key.');
-       
+        return;
+    }
+
+    const reCheckedResults = [];
+    for (let mcq of allResults.flatMap(result => result.split('\n\n\n'))) {
+        try {
+            const recheckedMCQ = await callGeminiAPI(apiKey, modelName, mcq, 'text/plain', true);
+            reCheckedResults.push(recheckedMCQ);
+        } catch (error) {
+            console.error(`Error rechecking MCQ:`, error);
+            reCheckedResults.push(`Error rechecking MCQ: ${error.message}`);
+        }
+        await new Promise(resolve => setTimeout(resolve, IMAGE_PROCESSING_DELAY));
+    }
+
+    allResults = [reCheckedResults.join('\n\n\n')];
+    displayResults();
+}
+
+async function verifySolution(index) {
+    const apiKey = document.getElementById('apiKey').value;
+    const modelName = document.getElementById('modelSelect').value;
+
+    if (!apiKey) {
+        alert('Please enter API key.');
+        return;
+    }
+
+    const mcq = allResults[index];
+    try {
+        const verifiedMCQ = await callGeminiAPI(apiKey, modelName, mcq, 'text/plain', true);
+        allResults[index] = verifiedMCQ;
+        displayResults();
+    } catch (error) {
+        console.error(`Error verifying solution:`, error);
+        alert(`Error verifying solution: ${error.message}`);
+    }
+}
+
+function editPrompt() {
+    const promptInput = document.getElementById('promptInput');
+    const promptPreview = document.getElementById('promptPreview');
+    promptPreview.textContent = promptInput.value;
+    promptPreview.style.display = 'block';
+    promptInput.style.display = 'none';
+}
+
+async function processPrompt() {
+    const apiKey = document.getElementById('apiKey').value;
+    const modelName = document.getElementById('modelSelect').value;
+    const promptInput = document.getElementById('promptInput');
+    const promptPreview = document.getElementById('promptPreview');
+    const resultsContainer = document.getElementById('resultsContainer');
+
+    if (!apiKey) {
+        alert('Please enter API key.');
+        return;
+    }
+
+    const userPrompt = promptPreview.style.display === 'block' ? promptPreview.textContent : promptInput.value;
+    if (!userPrompt && promptImages.length === 0) {
+        alert('Please enter a prompt or upload an image.');
+        return;
+    }
+
+    try {
+        const currentMCQs = allResults.length > 0 ? allResults.join('\n\n') : "No MCQs extracted yet.";
+        let imageData = [];
+
+        for (let file of promptImages) {
+            imageData.push({
+                inline_data: {
+                    mime_type: file.type,
+                    data: await getBase64(file)
+                }
+            });
+        }
+
+        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                contents: [{
+                    parts: [
+                        { text: `Current MCQs:\n\n${currentMCQs}\n\nUser prompt: ${userPrompt}\n\nInstructions:
+            1. Process the MCQs according to the user's prompt.
+            2. Only modify the questions specified in the prompt.
+            3. For each modified question, create a new entry without changing the original.
+            4. Do not include phrases like "Therefore, the correct answer is...".
+            5. Maintain the original formatting and structure of the MCQs.
+            6. If no MCQs exist, generate new ones based on the prompt.
+            7. Return only the new or modified MCQs, not the entire set.
+            8. If images are provided, analyze them and incorporate relevant information into the MCQs.
+            9. Provide complete calculations in solutions, formatted line by line for readability.
+            10. Use '^' for exponents instead of HTML superscript tags. For example, write 'x^2' instead of 'x<sup>2</sup>'.
+            11. If you detect a diagram or complex image in the question, add the fire emoji (🔥) at the beginning of the question text.` },
+                        ...imageData
+                    ]
+                }],
+                generationConfig: {
+                    temperature: 0.4,
+                    topK: 40,
+                    topP: 0.95,
+                    maxOutputTokens: 8192,
+                    stopSequences: []
+                }
+            })
+        });
+
+        if (!response.ok) {
+            const errorData = await response.json();
+            throw new Error(`API error: ${response.status} - ${JSON.stringify(errorData)}`);
+        }
+
+        const data = await response.json();
+        const processedResult = data.candidates[0].content.parts[0].text.trim();
+        allResults.push(processedResult);
+        displayResults();
+        promptInput.value = '';
+        promptPreview.textContent = '';
+        promptPreview.style.display = 'none';
+        promptInput.style.display = 'block';
+        clearPromptImages();
+    } catch (error) {
+        console.error('Error processing prompt:', error);
+        alert(`Error processing prompt: ${error.message}`);
+    }
+}
+
+function clearPromptImages() {
+    const promptImagesContainer = document.getElementById('promptImages');
+    promptImagesContainer.innerHTML = '';
+    promptImages = [];
+    document.getElementById('promptImageInput').value = '';
+}
+
+function updateProgressBar(current, total) {
+    const progressBar = document.getElementById('progressBarFill');
+    const progressText = document.getElementById('progressText');
+    const percentage = (current / total) * 100;
+    progressBar.style.width = `${percentage}%`;
+    progressText.textContent = `Processing: ${current} / ${total} images`;
+}
+
+function startTimer() {
+    startTime = Date.now();
+    updateTimer();
+    timerInterval = setInterval(updateTimer, 1000);
+}
+
+function stopTimer() {
+    clearInterval(timerInterval);
+}
+
+function updateTimer() {
+    const elapsedTime = Math.floor((Date.now() - startTime) / 1000);
+    const hours = Math.floor(elapsedTime / 3600);
+    const minutes = Math.floor((elapsedTime % 3600) / 60);
+    const seconds = elapsedTime % 60;
+    document.getElementById('timerDisplay').textContent = 
+        `Time elapsed: ${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+}
+
+function playAlarmSound() {
+    const alarmSound = document.getElementById('alarmSound');
+    alarmSound.play();
+}
+
+// Firebase-specific functions
+function saveToFirebase() {
+    if (!auth.currentUser) {
+        alert('Please log in to save results');
+        return;
+    }
+    db.collection('mcqs').add({
+        userId: auth.currentUser.uid,
+        results: allResults,
+        timestamp: firebase.firestore.FieldValue.serverTimestamp()
+    })
+    .then((docRef) => {
+        console.log("Document written with ID: ", docRef.id);
+        alert('Results saved successfully!');
+        loadSavedMCQs();
+    })
+    .catch((error) => {
+        console.error("Error adding document: ", error);
+        alert('Error saving results');
+    });
+}
+
+function loadSavedMCQs() {
+    if (!auth.currentUser) return;
+    db.collection('mcqs')
+        .where('userId', '==', auth.currentUser.uid)
+        .orderBy('timestamp', 'desc')
+        .get()
+        .then((querySnapshot) => {
+            const savedMCQsContainer = document.getElementById('savedMCQs');
+            savedMCQsContainer.innerHTML = '<h3>Saved MCQs</h3>';
+            querySnapshot.forEach((doc) => {
+                const mcqSet = doc.data();
+                const mcqDiv = document.createElement('div');
+                mcqDiv.className = 'mcq-item';
+                mcqDiv.textContent = `MCQ Set from ${mcqSet.timestamp.toDate().toLocaleString()}`;
+                mcqDiv.onclick = () => {
+                    allResults = mcqSet.results;
+                    displayResults();
+                };
+                savedMCQsContainer.appendChild(mcqDiv);
+            });
+        })
+        .catch((error) => {
+            console.error("Error loading saved MCQs: ", error);
+        });
+}
+
+// Event listeners
+document.getElementById('themeToggle').addEventListener('click', function() {
+    const currentTheme = document.documentElement.getAttribute('data-theme');
+    let newTheme;
+    switch (currentTheme) {
+        case 'light':
+            newTheme = 'dark';
+            break;
+        case 'dark':
+            newTheme = 'blue';
+            break;
+        case 'blue':
+            newTheme = 'green';
+            break;
+        default:
+            newTheme = 'light';
+    }
+    document.documentElement.setAttribute('data-theme', newTheme);
+});
+
+document.addEventListener('dragover', (e) => {
+    e.preventDefault();
+});
+
+document.addEventListener('drop', (e) => {
+    e.preventDefault();
+    handleFiles(e.dataTransfer.files);
+});
+
+document.addEventListener('paste', (e) => {
+    const items = e.clipboardData.items;
+    for (let item of items) {
+        if (item.type.indexOf('image') !== -1) {
+            const blob = item.getAsFile();
+            handleFiles([blob]);
+        }
+    }
+});
+
+function handleFiles(files) {
+    for (let file of files) {
+        if (file.type === 'application/pdf') {
+            convertPDFToImages(file);
+        } else if (file.type.startsWith('image/')) {
+            addImages([file]);
+        }
+    }
+}
+
+document.getElementById('pdfInput').addEventListener('change', function(e) {
+    const file = e.target.files[0];
+    if (file && file.type === 'application/pdf') {
+        convertPDFToImages(file);
+    } else {
+        alert('Please upload a PDF file.');
+    }
+});
+
+document.getElementById('imageInput').addEventListener('change', function(e) {
+    addImages(e.target.files);
+});
+
+const promptBox = document.getElementById('promptBox');
+const promptInput = document.getElementById('promptInput');
+
+promptBox.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    promptBox.style.backgroundColor = 'rgba(0, 0, 0, 0.1)';
+});
+
+promptBox.addEventListener('dragleave', () => {
+    promptBox.style.backgroundColor = '';
+});
+
+promptBox.addEventListener('drop', (e) => {
+    e.preventDefault();
+    promptBox.style.backgroundColor = '';
+    handlePromptFiles(e.dataTransfer.files);
+});
+
+promptInput.addEventListener('paste', (e) => {
+    const items = e.clipboardData.items;
+    for (let item of items) {
+        if (item.type.indexOf('image') !== -1) {
+            const blob = item.getAsFile();
+            handlePromptFiles([blob]);
+        }
+    }
+});
+
+function handlePromptFiles(files) {
+    for (let file of files) {
+        if (file.type.startsWith('image/')) {
+            addPromptImage(file);
+        }
+    }
+}
+
+function addPromptImage(file) {
+    const reader = new FileReader();
+    reader.onload = function(e) {
+        const img = document.createElement('img');
+        img.src = e.target.result;
+        document.getElementById('promptImages').appendChild(img);
+        promptImages.push(file);
+    }
+    reader.readAsDataURL(file);
+}
+
+// Initialize the application
+document.addEventListener('DOMContentLoaded', function() {
+    // Set initial theme
+    const prefersDarkScheme = window.matchMedia("(prefers-color-scheme: dark)");
+    if (prefersDarkScheme.matches) {
+        document.documentElement.setAttribute('data-theme', 'dark');
+    } else {
+        document.documentElement.setAttribute('data-theme', 'light');
+    }
+
+    // Check if user is already logged in
+    auth.onAuthStateChanged((user) => {
+        if (user) {
+            showUserInfo(user);
+        } else {
+            showAuthForms();
+        }
+    });
+
+    // Initialize any necessary components or state
+});
